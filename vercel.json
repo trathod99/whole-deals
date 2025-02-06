@@ -1,0 +1,6 @@
+{
+  "crons": [{
+    "path": "/api/scrape",
+    "schedule": "0 9 * * 3"  // Run every Wednesday at 9am
+  }]
+} 
