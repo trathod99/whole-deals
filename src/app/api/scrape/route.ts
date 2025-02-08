@@ -1,17 +1,14 @@
 import { createRouteHandlerClient } from '@supabase/auth-helpers-nextjs'
 import { cookies } from 'next/headers'
 import { NextResponse } from 'next/server'
-import { Resend } from 'resend'
-import { render } from '@react-email/render'
 import { scrapeWholeFoods } from '@/lib/scraper'
 import { getCachedDeals, cacheDeals } from '@/lib/cache'
 import { findMatchingDeals } from '@/lib/matching'
-import DealsEmail from '@/emails/DealsEmail'
-
-const resend = new Resend(process.env.RESEND_API_KEY)
+import { sendDealsEmail } from '@/lib/email'
 
 export async function GET() {
   const supabase = createRouteHandlerClient({ cookies })
+  console.log('Starting scrape process...')
 
   try {
     // 1. Try to get cached deals first
@@ -22,6 +19,7 @@ export async function GET() {
     if (!deals) {
       console.log('No valid cache found, scraping new deals...')
       deals = await scrapeWholeFoods()
+      console.log(`Scraped ${deals.length} deals`)
       
       // Save scrape history and cache the results
       const { data: scrapeHistory, error: scrapeError } = await supabase
@@ -35,8 +33,9 @@ export async function GET() {
 
       if (scrapeError) throw scrapeError
       scrapeId = scrapeHistory.id
+      console.log('Saved scrape history with ID:', scrapeId)
     } else {
-      console.log('Using cached deals from previous scrape')
+      console.log(`Using ${deals.length} cached deals from previous scrape`)
       // Get the scrape ID from the most recent successful scrape
       const { data: scrapeHistory } = await supabase
         .from('scrape_history')
@@ -48,6 +47,7 @@ export async function GET() {
       
       if (scrapeHistory) {
         scrapeId = scrapeHistory.id
+        console.log('Using existing scrape ID:', scrapeId)
       }
     }
 
@@ -56,6 +56,7 @@ export async function GET() {
     }
 
     // 3. Get all users and their preferences
+    console.log('Fetching users and preferences...')
     const { data: users } = await supabase.auth.admin.listUsers()
     const { data: allPreferences } = await supabase
       .from('user_preferences')
@@ -65,18 +66,29 @@ export async function GET() {
       throw new Error('Failed to fetch users or preferences')
     }
 
-    // 4. For each user, match deals with their preferences
+    console.log(`Found ${users.users.length} users and ${allPreferences.length} preferences`)
+
+    // 4. For each user, match deals with their preferences and send email
+    const emailResults = []
     for (const user of users.users) {
+      console.log(`Processing user: ${user.email}`)
       const userPreferences = allPreferences.filter(p => p.user_id === user.id)
-      if (!userPreferences.length) continue
+      if (!userPreferences.length || !user.email) {
+        console.log('Skipping user - no preferences or email')
+        continue
+      }
 
       const preferenceTexts = userPreferences.map(p => p.preference_text)
+      console.log('User preferences:', preferenceTexts)
       
       // Find matching deals for this user
+      console.log('Finding matching deals...')
       const matchedDeals = await findMatchingDeals(deals, preferenceTexts)
+      console.log(`Found ${matchedDeals.length} matching deals`)
 
       // Save matched deals to database
       if (matchedDeals.length > 0) {
+        console.log('Saving matched deals to database...')
         const dealsToInsert = matchedDeals.map(deal => ({
           scrape_id: scrapeId!,
           user_id: user.id,
@@ -93,29 +105,36 @@ export async function GET() {
         }))
 
         await supabase.from('matched_deals').insert(dealsToInsert)
+        console.log('Matched deals saved successfully')
 
-        // Send email if we found matches
-        if (user.email) {
-          const emailHtml = await render(
-            DealsEmail({
-              deals: matchedDeals,
-              preferences: preferenceTexts,
-            })
-          )
-
-          await resend.emails.send({
-            from: 'Whole Foods Deals <deals@resend.dev>',
-            to: user.email,
-            subject: `Found ${matchedDeals.length} Whole Foods deals matching your preferences`,
-            html: emailHtml,
-          })
-        }
+        // Send email with proper error handling
+        console.log('Sending email to user...')
+        const emailResult = await sendDealsEmail(
+          user.email,
+          matchedDeals,
+          preferenceTexts
+        )
+        
+        console.log('Email result:', emailResult)
+        emailResults.push({
+          email: user.email,
+          success: emailResult.success,
+          error: emailResult.error
+        })
+      } else {
+        console.log('No matching deals found for user')
       }
     }
 
-    return NextResponse.json({ success: true })
+    return NextResponse.json({ 
+      success: true,
+      emailResults 
+    })
   } catch (error) {
     console.error('Scraping error:', error)
+    if (error instanceof Error) {
+      console.error('Error stack:', error.stack)
+    }
 
     // Save error to scrape history
     await supabase.from('scrape_history').insert({

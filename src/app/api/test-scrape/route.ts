@@ -4,6 +4,13 @@ import { NextResponse } from 'next/server'
 import { scrapeWholeFoods } from '@/lib/scraper'
 import { getCachedDeals, cacheDeals } from '@/lib/cache'
 import { findMatchingDeals } from '@/lib/matching'
+import { sendDealsEmail } from '@/lib/email'
+import { Database } from '@/types/database.types'
+
+type MatchedDeal = Omit<
+  Database['public']['Tables']['matched_deals']['Insert'],
+  'id' | 'scrape_id' | 'user_id' | 'created_at'
+>
 
 export const dynamic = 'force-dynamic'
 
@@ -22,6 +29,8 @@ export async function GET(request: Request) {
         { status: 401 }
       )
     }
+
+    console.log('Starting test scrape for user:', user.email)
 
     // Try to get cached deals first
     let deals = await getCachedDeals()
@@ -46,6 +55,7 @@ export async function GET(request: Request) {
         throw scrapeError
       }
       scrapeId = scrapeHistory.id
+      console.log('Saved new scrape with ID:', scrapeId)
     } else {
       console.log('Using cached deals from previous scrape')
       // Get the scrape ID from the most recent successful scrape
@@ -59,10 +69,12 @@ export async function GET(request: Request) {
       
       if (scrapeHistory) {
         scrapeId = scrapeHistory.id
+        console.log('Using existing scrape ID:', scrapeId)
       }
     }
 
     // Get user's preferences
+    console.log('Fetching user preferences...')
     const { data: preferences } = await supabase
       .from('user_preferences')
       .select('*')
@@ -70,28 +82,50 @@ export async function GET(request: Request) {
 
     // Find matching deals
     const preferenceTexts = preferences?.map(p => p.preference_text) || []
-    const matchedDeals = preferenceTexts.length > 0
-      ? await findMatchingDeals(deals, preferenceTexts)
-      : []
+    console.log('User preferences:', preferenceTexts)
 
-    // Save matches if we have a scrape ID
-    if (scrapeId && matchedDeals.length > 0) {
-      const dealsToInsert = matchedDeals.map(deal => ({
-        scrape_id: scrapeId,
-        user_id: user.id,
-        product_name: deal.product_name,
-        product_description: deal.product_description,
-        sale_price: deal.sale_price,
-        regular_price: deal.regular_price,
-        discount_percentage: deal.discount_percentage,
-        category: deal.category,
-        image_url: deal.image_url,
-        product_url: deal.product_url,
-        confidence_score: deal.confidence_score,
-        matching_explanation: deal.matching_explanation,
-      }))
+    let matchedDeals: MatchedDeal[] = []
+    let emailResult = null
 
-      await supabase.from('matched_deals').insert(dealsToInsert)
+    if (preferenceTexts.length > 0) {
+      console.log('Finding matching deals...')
+      matchedDeals = await findMatchingDeals(deals, preferenceTexts)
+      console.log(`Found ${matchedDeals.length} matching deals`)
+
+      // Save matches if we have a scrape ID
+      if (scrapeId && matchedDeals.length > 0) {
+        console.log('Saving matched deals to database...')
+        const dealsToInsert = matchedDeals.map(deal => ({
+          scrape_id: scrapeId,
+          user_id: user.id,
+          product_name: deal.product_name,
+          product_description: deal.product_description,
+          sale_price: deal.sale_price,
+          regular_price: deal.regular_price,
+          discount_percentage: deal.discount_percentage,
+          category: deal.category,
+          image_url: deal.image_url,
+          product_url: deal.product_url,
+          confidence_score: deal.confidence_score,
+          matching_explanation: deal.matching_explanation,
+        }))
+
+        await supabase.from('matched_deals').insert(dealsToInsert)
+        console.log('Saved matched deals to database')
+
+        // Send email with the matching deals
+        if (user.email) {
+          console.log('Sending email to user:', user.email)
+          emailResult = await sendDealsEmail(
+            user.email,
+            matchedDeals,
+            preferenceTexts
+          )
+          console.log('Email result:', emailResult)
+        }
+      }
+    } else {
+      console.log('No preferences found for user')
     }
 
     return NextResponse.json({
@@ -101,6 +135,7 @@ export async function GET(request: Request) {
       deals: deals,
       matchedDeals: matchedDeals,
       preferences: preferenceTexts,
+      emailResult
     })
   } catch (error) {
     console.error('Test scraping error:', error)
