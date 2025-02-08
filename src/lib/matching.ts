@@ -23,46 +23,51 @@ const anthropic = new Anthropic({
 })
 
 // Batch size for processing deals
-const BATCH_SIZE = 5 // Reduced batch size for better accuracy
-// Maximum number of concurrent calls
+const BATCH_SIZE = 5
 const MAX_CONCURRENT_CALLS = 3
 
 async function matchDealBatch(
   deals: Deal[],
   preferences: string[],
-  batchStartIndex: number // Add batch start index
+  batchStartIndex: number
 ): Promise<BatchMatchResult[]> {
+  // Assign unique IDs to each product to ensure accurate matching
+  const dealsWithIds = deals.map((deal, index) => ({
+    ...deal,
+    batchId: `PROD_${index + 1}` // e.g., PROD_1, PROD_2, etc.
+  }))
+
   const prompt = `You are evaluating if products match specific food preferences.
 
 Products:
-${deals.map((deal, i) => `
-Product ${i + 1}:
-- Name: ${deal.product_name}
-- Description: ${deal.product_description || 'No description available'}
-- Category: ${deal.category}
+${dealsWithIds.map(deal => `
+${deal.batchId}:
+Name: ${deal.product_name}
+Description: ${deal.product_description || 'No description available'}
+Category: ${deal.category}
 `).join('\n')}
 
 Preferences:
 ${preferences.map((pref, i) => `${i + 1}. ${pref}`).join('\n')}
 
-For each product-preference combination, analyze if there's a match. Consider:
-1. Direct matches (e.g., "organic" preference matches "organic apples")
-2. Category matches (e.g., "high protein" matches meat products)
-3. Ingredient implications (e.g., "no dairy" should exclude milk products)
-4. Nutritional alignment (e.g., "healthy snacks" matches appropriate items)
-
-IMPORTANT: For each match, ensure the explanation specifically references the product name and why it matches the preference.
-
-Respond with a JSON array of matches. Each match should have this format:
+For each product-preference combination that matches (confidence >= 50), create a JSON object with:
 {
-  "dealIndex": number,      // 0-based index of the product in this batch
-  "preferenceIndex": number,// 0-based index of the preference
-  "confidence": number,     // 0-100 confidence score
-  "explanation": string     // Brief explanation of why THIS SPECIFIC product matches
+  "dealId": string,        // The PROD_X identifier
+  "preferenceIndex": number,// 0-based index of the matching preference
+  "confidence": number,    // 50-100 confidence score
+  "explanation": string    // Explanation starting with the product name
 }
 
-Only include matches with confidence >= 50. Format the response as a valid JSON array.
-Double check that each explanation matches its corresponding product.`
+IMPORTANT RULES:
+1. Start each explanation with the EXACT product name
+2. Only include matches with confidence >= 50
+3. Explain specifically why THIS product matches THIS preference
+4. Return a JSON array of matches
+
+Example explanation format:
+"[Product Name] matches the [preference] because [specific reason]"
+
+Return ONLY a JSON array. No other text.`
 
   try {
     const response = await anthropic.messages.create({
@@ -83,31 +88,40 @@ Double check that each explanation matches its corresponding product.`
         .replace(/\s*```$/, '')
         .trim()
 
-      const results = JSON.parse(cleanedContent) as BatchMatchResult[]
-      
-      // Validate each result
-      return results.filter(result => {
-        // Ensure dealIndex is valid
-        if (result.dealIndex < 0 || result.dealIndex >= deals.length) {
-          console.error('Invalid deal index:', result)
-          return false
-        }
-        
-        // Verify explanation mentions the product
-        const deal = deals[result.dealIndex]
-        const productNameLower = deal.product_name.toLowerCase()
-        const explanationLower = result.explanation.toLowerCase()
-        
-        if (!explanationLower.includes(productNameLower)) {
-          console.error('Explanation does not match product:', {
-            product: deal.product_name,
+      const results = JSON.parse(cleanedContent) as Array<{
+        dealId: string
+        preferenceIndex: number
+        confidence: number
+        explanation: string
+      }>
+
+      // Convert dealId (PROD_X) back to batch index and validate
+      return results
+        .map(result => {
+          const batchIndex = parseInt(result.dealId.replace('PROD_', '')) - 1
+          if (batchIndex < 0 || batchIndex >= deals.length) {
+            console.error('Invalid batch index:', { result, batchIndex })
+            return null
+          }
+
+          const deal = deals[batchIndex]
+          if (!result.explanation.toLowerCase().startsWith(deal.product_name.toLowerCase())) {
+            console.error('Explanation doesn\'t start with product name:', {
+              product: deal.product_name,
+              explanation: result.explanation
+            })
+            return null
+          }
+
+          return {
+            dealIndex: batchIndex,
+            preferenceIndex: result.preferenceIndex,
+            confidence: result.confidence,
             explanation: result.explanation
-          })
-          return false
-        }
-        
-        return true
-      })
+          }
+        })
+        .filter((result): result is BatchMatchResult => result !== null)
+
     } catch (error) {
       console.error('Error parsing batch results:', error)
       return []
@@ -144,21 +158,16 @@ export async function findMatchingDeals(
     
     const results = await Promise.all(batchPromises)
     results.forEach((result, batchIndex) => {
-      // Adjust deal indices based on batch position
       const batchOffset = (i + batchIndex) * BATCH_SIZE
       result.forEach(match => {
         const globalDealIndex = batchOffset + match.dealIndex
-        // Verify the match corresponds to the correct deal
         const deal = deals[globalDealIndex]
-        if (deal && match.explanation.toLowerCase().includes(deal.product_name.toLowerCase())) {
+        
+        // Final validation before adding to results
+        if (deal && match.explanation.toLowerCase().startsWith(deal.product_name.toLowerCase())) {
           batchResults.push({
             ...match,
             dealIndex: globalDealIndex
-          })
-        } else {
-          console.error('Mismatched deal:', {
-            deal: deal?.product_name,
-            explanation: match.explanation
           })
         }
       })
@@ -181,10 +190,7 @@ export async function findMatchingDeals(
   // Create final matched deals array
   dealMatches.forEach((match, dealIndex) => {
     const deal = deals[dealIndex]
-    // Double check the match is valid
-    if (match.confidence >= 50 && 
-        deal && 
-        match.explanation.toLowerCase().includes(deal.product_name.toLowerCase())) {
+    if (deal) {
       matchingDeals.push({
         ...deal,
         confidence_score: match.confidence,
