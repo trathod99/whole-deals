@@ -4,32 +4,56 @@ import { NextResponse } from 'next/server'
 import { Resend } from 'resend'
 import { render } from '@react-email/render'
 import { scrapeWholeFoods } from '@/lib/scraper'
+import { getCachedDeals, cacheDeals } from '@/lib/cache'
+import { findMatchingDeals } from '@/lib/matching'
 import DealsEmail from '@/emails/DealsEmail'
-import Anthropic from '@anthropic-ai/sdk'
 
 const resend = new Resend(process.env.RESEND_API_KEY)
-const anthropic = new Anthropic({
-  apiKey: process.env.ANTHROPIC_API_KEY || '',
-})
 
 export async function GET() {
   const supabase = createRouteHandlerClient({ cookies })
 
   try {
-    // 1. Scrape deals
-    const deals = await scrapeWholeFoods()
+    // 1. Try to get cached deals first
+    let deals = await getCachedDeals()
+    let scrapeId: string | null = null
 
-    // 2. Save scrape history
-    const { data: scrapeHistory, error: scrapeError } = await supabase
-      .from('scrape_history')
-      .insert({
-        successful: true,
-        data: deals,
-      })
-      .select()
-      .single()
+    // 2. If no valid cache, scrape new deals
+    if (!deals) {
+      console.log('No valid cache found, scraping new deals...')
+      deals = await scrapeWholeFoods()
+      
+      // Save scrape history and cache the results
+      const { data: scrapeHistory, error: scrapeError } = await supabase
+        .from('scrape_history')
+        .insert({
+          successful: true,
+          data: deals,
+        })
+        .select()
+        .single()
 
-    if (scrapeError) throw scrapeError
+      if (scrapeError) throw scrapeError
+      scrapeId = scrapeHistory.id
+    } else {
+      console.log('Using cached deals from previous scrape')
+      // Get the scrape ID from the most recent successful scrape
+      const { data: scrapeHistory } = await supabase
+        .from('scrape_history')
+        .select('id')
+        .eq('successful', true)
+        .order('scraped_at', { ascending: false })
+        .limit(1)
+        .single()
+      
+      if (scrapeHistory) {
+        scrapeId = scrapeHistory.id
+      }
+    }
+
+    if (!scrapeId) {
+      throw new Error('Failed to get scrape ID')
+    }
 
     // 3. Get all users and their preferences
     const { data: users } = await supabase.auth.admin.listUsers()
@@ -47,76 +71,38 @@ export async function GET() {
       if (!userPreferences.length) continue
 
       const preferenceTexts = userPreferences.map(p => p.preference_text)
-      const preferenceContext = preferenceTexts.join('\n')
+      
+      // Find matching deals for this user
+      const matchedDeals = await findMatchingDeals(deals, preferenceTexts)
 
-      // 5. Use Claude to match deals with preferences
-      for (const deal of deals) {
-        const prompt = `You are evaluating whether a product matches a user's food preferences.
+      // Save matched deals to database
+      if (matchedDeals.length > 0) {
+        const dealsToInsert = matchedDeals.map(deal => ({
+          scrape_id: scrapeId!,
+          user_id: user.id,
+          product_name: deal.product_name,
+          product_description: deal.product_description,
+          sale_price: deal.sale_price,
+          regular_price: deal.regular_price,
+          discount_percentage: deal.discount_percentage,
+          category: deal.category,
+          image_url: deal.image_url,
+          product_url: deal.product_url,
+          confidence_score: deal.confidence_score,
+          matching_explanation: deal.matching_explanation,
+        }))
 
-Product Information:
-Name: ${deal.product_name}
-Description: ${deal.product_description}
-Category: ${deal.category}
+        await supabase.from('matched_deals').insert(dealsToInsert)
 
-User's Food Preferences:
-${preferenceContext}
-
-Does this product match the user's preferences? Respond with a confidence score (0-100) and a brief explanation.
-Format your response exactly like this example:
-Score: 85
-Explanation: This high-protein snack aligns with the user's preference for protein-rich foods.`
-
-        const response = await anthropic.messages.create({
-          model: 'claude-3-haiku-20240307',
-          max_tokens: 100,
-          temperature: 0,
-          messages: [{ role: 'user', content: prompt }],
-        })
-
-        const messageContent = response.content[0].type === 'text' 
-          ? response.content[0].text 
-          : ''
-          
-        const [scoreLine, explanationLine] = messageContent.split('\n')
-        const confidenceScore = parseInt(scoreLine.split(': ')[1])
-        const explanation = explanationLine.split(': ')[1]
-
-        if (confidenceScore >= 50) {
-          // 6. Save matched deal
-          await supabase.from('matched_deals').insert({
-            scrape_id: scrapeHistory.id,
-            user_id: user.id,
-            product_name: deal.product_name,
-            product_description: deal.product_description,
-            sale_price: deal.sale_price,
-            regular_price: deal.regular_price,
-            discount_percentage: deal.discount_percentage,
-            category: deal.category,
-            image_url: deal.image_url,
-            product_url: deal.product_url,
-            confidence_score: confidenceScore,
-            matching_explanation: explanation || '',
-          })
-        }
-      }
-
-      // 7. Get all matched deals for the user
-      const { data: matchedDeals } = await supabase
-        .from('matched_deals')
-        .select('*')
-        .eq('scrape_id', scrapeHistory.id)
-        .eq('user_id', user.id)
-
-      if (matchedDeals && matchedDeals.length > 0) {
-        // 8. Send email
-        const emailHtml = await render(
-          DealsEmail({
-            deals: matchedDeals,
-            preferences: preferenceTexts,
-          })
-        )
-
+        // Send email if we found matches
         if (user.email) {
+          const emailHtml = await render(
+            DealsEmail({
+              deals: matchedDeals,
+              preferences: preferenceTexts,
+            })
+          )
+
           await resend.emails.send({
             from: 'Whole Foods Deals <deals@resend.dev>',
             to: user.email,

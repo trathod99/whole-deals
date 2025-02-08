@@ -12,10 +12,13 @@ import {
 } from '@react-email/components'
 import { Database } from '@/types/database.types'
 
-type Deal = Database['public']['Tables']['matched_deals']['Row']
+type BaseDeal = Omit<
+  Database['public']['Tables']['matched_deals']['Insert'],
+  'id' | 'scrape_id' | 'user_id' | 'created_at'
+>
 
 interface DealsEmailProps {
-  deals: Deal[]
+  deals: BaseDeal[]
   preferences: string[]
 }
 
@@ -28,12 +31,12 @@ export default function DealsEmail({ deals, preferences }: DealsEmailProps) {
     }
     acc[category].push(deal)
     return acc
-  }, {} as Record<string, Deal[]>)
+  }, {} as Record<string, BaseDeal[]>)
 
   return (
     <Html>
       <Head />
-      <Preview>Found {deals.length} Whole Foods deals matching your preferences</Preview>
+      <Preview>{`Found ${deals.length} Whole Foods deals matching your preferences`}</Preview>
       <Body style={main}>
         <Container style={container}>
           <Heading style={h1}>Your Personalized Whole Foods Deals</Heading>
@@ -49,9 +52,8 @@ export default function DealsEmail({ deals, preferences }: DealsEmailProps) {
           {Object.entries(dealsByCategory).map(([category, categoryDeals]) => (
             <Section key={category} style={section}>
               <Heading style={h2}>{category}</Heading>
-              
               {categoryDeals.map((deal) => (
-                <Section key={deal.id} style={dealContainer}>
+                <Section key={`${deal.product_name}-${deal.sale_price}`} style={dealContainer}>
                   <div style={dealGrid}>
                     {deal.image_url && (
                       <Img
@@ -84,6 +86,12 @@ export default function DealsEmail({ deals, preferences }: DealsEmailProps) {
                         <span style={discount}>
                           Save {deal.discount_percentage.toFixed(0)}%
                         </span>
+                      </Text>
+
+                      <Text style={matchInfo}>
+                        Match Confidence: {String(deal.confidence_score)}%
+                        <br />
+                        {deal.matching_explanation}
                       </Text>
                     </div>
                   </div>
@@ -195,4 +203,11 @@ const discount = {
 const link = {
   color: '#000',
   textDecoration: 'none',
+}
+
+const matchInfo = {
+  fontSize: '14px',
+  color: '#666666',
+  margin: '8px 0 0',
+  fontStyle: 'italic',
 } 

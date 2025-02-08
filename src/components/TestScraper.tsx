@@ -13,11 +13,18 @@ interface Deal {
   product_url: string
 }
 
+interface MatchedDeal extends Deal {
+  confidence_score: number
+  matching_explanation: string
+}
+
 interface ScrapeResult {
   success: boolean
   scrapeId: string
   dealsCount: number
   deals: Deal[]
+  matchedDeals: MatchedDeal[]
+  preferences: string[]
 }
 
 export default function TestScraper() {
@@ -25,6 +32,7 @@ export default function TestScraper() {
   const [error, setError] = useState<string | null>(null)
   const [result, setResult] = useState<ScrapeResult | null>(null)
   const [showAllDeals, setShowAllDeals] = useState(false)
+  const [showMatches, setShowMatches] = useState(true)
 
   const handleTestScrape = async () => {
     setIsLoading(true)
@@ -80,63 +88,144 @@ export default function TestScraper() {
                 Scrape Results
               </h3>
               <p className="mt-1 text-sm text-gray-500">
-                Found {result.dealsCount} deals
+                Found {result.dealsCount} total deals
               </p>
+              {result.matchedDeals.length > 0 && (
+                <p className="mt-1 text-sm text-gray-500">
+                  {result.matchedDeals.length} deals match your preferences
+                </p>
+              )}
               <p className="mt-1 text-sm text-gray-500">
                 Scrape ID: {result.scrapeId}
               </p>
+              {result.preferences.length > 0 && (
+                <p className="mt-1 text-sm text-gray-500">
+                  Your preferences: {result.preferences.join(', ')}
+                </p>
+              )}
             </div>
 
             <div className="mt-4 space-y-4">
-              <button
-                onClick={() => setShowAllDeals(!showAllDeals)}
-                className="text-sm text-blue-600 hover:text-blue-500"
-              >
-                {showAllDeals ? 'Hide Deals' : 'Show All Deals'}
-              </button>
+              <div className="flex gap-4">
+                <button
+                  onClick={() => setShowMatches(!showMatches)}
+                  className="text-sm text-blue-600 hover:text-blue-500"
+                >
+                  {showMatches ? 'Hide Matched Deals' : 'Show Matched Deals'}
+                </button>
+                <button
+                  onClick={() => setShowAllDeals(!showAllDeals)}
+                  className="text-sm text-blue-600 hover:text-blue-500"
+                >
+                  {showAllDeals ? 'Hide All Deals' : 'Show All Deals'}
+                </button>
+              </div>
 
-              {showAllDeals && (
-                <div className="mt-4 space-y-4">
-                  {result.deals.map((deal, index) => (
-                    <div
-                      key={index}
-                      className="rounded-lg border border-gray-200 p-4"
-                    >
-                      <div className="flex items-start gap-4">
-                        {deal.image_url && (
-                          <img
-                            src={deal.image_url}
-                            alt={deal.product_name}
-                            className="h-20 w-20 rounded-md object-cover"
-                          />
-                        )}
-                        <div className="flex-1">
-                          <h4 className="font-medium text-gray-900">
-                            {deal.product_name}
-                          </h4>
-                          {deal.product_description && (
-                            <p className="mt-1 text-sm text-gray-500">
-                              {deal.product_description}
-                            </p>
+              {showMatches && result.matchedDeals.length > 0 && (
+                <div>
+                  <h4 className="text-lg font-medium text-gray-900 mb-4">
+                    Matched Deals
+                  </h4>
+                  <div className="space-y-4">
+                    {result.matchedDeals.map((deal, index) => (
+                      <div
+                        key={index}
+                        className="rounded-lg border border-green-200 bg-green-50 p-4"
+                      >
+                        <div className="flex items-start gap-4">
+                          {deal.image_url && (
+                            <img
+                              src={deal.image_url}
+                              alt={deal.product_name}
+                              className="h-20 w-20 rounded-md object-cover"
+                            />
                           )}
-                          <div className="mt-2 text-sm">
-                            <span className="font-medium text-green-600">
-                              ${deal.sale_price.toFixed(2)}
-                            </span>
-                            <span className="ml-2 text-gray-500 line-through">
-                              ${deal.regular_price.toFixed(2)}
-                            </span>
-                            <span className="ml-2 text-green-600">
-                              Save {deal.discount_percentage.toFixed(0)}%
-                            </span>
-                          </div>
-                          <div className="mt-2 text-sm text-gray-500">
-                            Category: {deal.category}
+                          <div className="flex-1">
+                            <h4 className="font-medium text-gray-900">
+                              {deal.product_name}
+                            </h4>
+                            {deal.product_description && (
+                              <p className="mt-1 text-sm text-gray-500">
+                                {deal.product_description}
+                              </p>
+                            )}
+                            <div className="mt-2 text-sm">
+                              <span className="font-medium text-green-600">
+                                ${deal.sale_price.toFixed(2)}
+                              </span>
+                              <span className="ml-2 text-gray-500 line-through">
+                                ${deal.regular_price.toFixed(2)}
+                              </span>
+                              <span className="ml-2 text-green-600">
+                                Save {deal.discount_percentage.toFixed(0)}%
+                              </span>
+                            </div>
+                            <div className="mt-2 text-sm text-gray-500">
+                              Category: {deal.category}
+                            </div>
+                            <div className="mt-2 text-sm">
+                              <span className="font-medium text-blue-600">
+                                Match Confidence: {deal.confidence_score}%
+                              </span>
+                              <p className="mt-1 text-gray-600 italic">
+                                {deal.matching_explanation}
+                              </p>
+                            </div>
                           </div>
                         </div>
                       </div>
-                    </div>
-                  ))}
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {showAllDeals && (
+                <div>
+                  <h4 className="text-lg font-medium text-gray-900 mb-4">
+                    All Deals
+                  </h4>
+                  <div className="mt-4 space-y-4">
+                    {result.deals.map((deal, index) => (
+                      <div
+                        key={index}
+                        className="rounded-lg border border-gray-200 p-4"
+                      >
+                        <div className="flex items-start gap-4">
+                          {deal.image_url && (
+                            <img
+                              src={deal.image_url}
+                              alt={deal.product_name}
+                              className="h-20 w-20 rounded-md object-cover"
+                            />
+                          )}
+                          <div className="flex-1">
+                            <h4 className="font-medium text-gray-900">
+                              {deal.product_name}
+                            </h4>
+                            {deal.product_description && (
+                              <p className="mt-1 text-sm text-gray-500">
+                                {deal.product_description}
+                              </p>
+                            )}
+                            <div className="mt-2 text-sm">
+                              <span className="font-medium text-green-600">
+                                ${deal.sale_price.toFixed(2)}
+                              </span>
+                              <span className="ml-2 text-gray-500 line-through">
+                                ${deal.regular_price.toFixed(2)}
+                              </span>
+                              <span className="ml-2 text-green-600">
+                                Save {deal.discount_percentage.toFixed(0)}%
+                              </span>
+                            </div>
+                            <div className="mt-2 text-sm text-gray-500">
+                              Category: {deal.category}
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
                 </div>
               )}
             </div>
