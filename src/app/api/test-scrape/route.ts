@@ -81,7 +81,9 @@ export async function GET(request: Request) {
       .eq('user_id', user.id)
 
     // Find matching deals
-    const preferenceTexts = preferences?.map(p => p.preference_text) || []
+    const preferenceTexts = preferences?.map(p => 
+      p.preference_type === 'exclude' ? `no ${p.preference_text}` : p.preference_text
+    ) || []
     console.log('User preferences:', preferenceTexts)
 
     let matchedDeals: MatchedDeal[] = []

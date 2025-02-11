@@ -6,68 +6,45 @@ type Deal = Omit<
   'id' | 'scrape_id' | 'user_id' | 'confidence_score' | 'matching_explanation' | 'created_at'
 >
 
-interface MatchResult {
-  confidence: number
-  explanation: string
-}
-
-interface BatchMatchResult {
-  dealIndex: number
-  preferenceIndex: number
-  confidence: number
-  explanation: string
-}
-
 const anthropic = new Anthropic({
   apiKey: process.env.ANTHROPIC_API_KEY!,
 })
 
-// Batch size for processing deals
-const BATCH_SIZE = 5
-const MAX_CONCURRENT_CALLS = 3
+const BATCH_SIZE = 10
 
-async function matchDealBatch(
+async function checkExclusions(
   deals: Deal[],
-  preferences: string[],
-  batchStartIndex: number
-): Promise<BatchMatchResult[]> {
-  // Assign unique IDs to each product to ensure accurate matching
-  const dealsWithIds = deals.map((deal, index) => ({
-    ...deal,
-    batchId: `PROD_${index + 1}` // e.g., PROD_1, PROD_2, etc.
-  }))
+  exclusions: string[]
+): Promise<Map<number, string>> {
+  const excludedDeals = new Map<number, string>()
+  
+  const prompt = `You are checking if food products contain specific ingredients or qualities that should exclude them.
 
-  const prompt = `You are evaluating if products match specific food preferences.
+Products to evaluate:
+${deals.map((deal, i) => `${i + 1}. ${deal.product_name}${deal.product_description ? ` - ${deal.product_description}` : ''}`).join('\n')}
 
-Products:
-${dealsWithIds.map(deal => `
-${deal.batchId}:
-Name: ${deal.product_name}
-Description: ${deal.product_description || 'No description available'}
-Category: ${deal.category}
-`).join('\n')}
+Items to exclude if found (check each product against ALL items):
+${exclusions.map(ex => `- ${ex}`).join('\n')}
 
-Preferences:
-${preferences.map((pref, i) => `${i + 1}. ${pref}`).join('\n')}
+Instructions:
+- Return ONLY products that DEFINITELY contain excluded items
+- Require EXPLICIT evidence (ingredients, descriptions, categories)
+- Do NOT exclude based on assumptions
+- If unsure, do not exclude
+- Return valid JSON only - no explanatory text or markdown
 
-For each product-preference combination that matches (confidence >= 50), create a JSON object with:
+Return Format:
 {
-  "dealId": string,        // The PROD_X identifier
-  "preferenceIndex": number,// 0-based index of the matching preference
-  "confidence": number,    // 50-100 confidence score
-  "explanation": string    // Explanation starting with the product name
+  "excluded_products": [
+    {
+      "index": product_number,
+      "reason": "Clear explanation of why this product contains an excluded item"
+    }
+  ]
 }
 
-IMPORTANT RULES:
-1. Start each explanation with the EXACT product name
-2. Only include matches with confidence >= 50
-3. Explain specifically why THIS product matches THIS preference
-4. Return a JSON array of matches
-
-Example explanation format:
-"[Product Name] matches the [preference] because [specific reason]"
-
-Return ONLY a JSON array. No other text.`
+Only return products that you are VERY confident (90%+) contain excluded items.
+Return ONLY the JSON object. No other text, no markdown formatting.`
 
   try {
     const response = await anthropic.messages.create({
@@ -77,127 +54,182 @@ Return ONLY a JSON array. No other text.`
       messages: [{ role: 'user', content: prompt }],
     })
 
-    const messageContent = response.content[0].type === 'text' 
-      ? response.content[0].text 
-      : ''
-
+    const content = response.content[0].type === 'text' ? response.content[0].text : ''
+    let cleanedContent = ''
+    
     try {
-      // Clean up the response to ensure we only have JSON
-      const cleanedContent = messageContent.trim()
+      // Clean the JSON string more aggressively
+      cleanedContent = content
+        .trim()
+        // Remove any markdown code block syntax
         .replace(/^```json\s*/, '')
         .replace(/\s*```$/, '')
-        .trim()
+        // Remove any trailing commas before closing brackets
+        .replace(/,(\s*[}\]])/g, '$1')
+        // Remove any non-JSON text before or after the object
+        .replace(/^[^{]*({[\s\S]*})[^}]*$/, '$1')
 
-      const results = JSON.parse(cleanedContent) as Array<{
-        dealId: string
-        preferenceIndex: number
-        confidence: number
-        explanation: string
-      }>
+      const result = JSON.parse(cleanedContent)
+      
+      if (!result.excluded_products || !Array.isArray(result.excluded_products)) {
+        console.error('Invalid exclusion result format:', result)
+        return excludedDeals
+      }
 
-      // Convert dealId (PROD_X) back to batch index and validate
-      return results
-        .map(result => {
-          const batchIndex = parseInt(result.dealId.replace('PROD_', '')) - 1
-          if (batchIndex < 0 || batchIndex >= deals.length) {
-            console.error('Invalid batch index:', { result, batchIndex })
-            return null
-          }
-
-          const deal = deals[batchIndex]
-          if (!result.explanation.toLowerCase().startsWith(deal.product_name.toLowerCase())) {
-            console.error('Explanation doesn\'t start with product name:', {
-              product: deal.product_name,
-              explanation: result.explanation
-            })
-            return null
-          }
-
-          return {
-            dealIndex: batchIndex,
-            preferenceIndex: result.preferenceIndex,
-            confidence: result.confidence,
-            explanation: result.explanation
-          }
-        })
-        .filter((result): result is BatchMatchResult => result !== null)
-
+      result.excluded_products.forEach((product: { index: number, reason: string }) => {
+        if (typeof product.index === 'number' && 
+            product.index > 0 && 
+            product.index <= deals.length &&
+            typeof product.reason === 'string') {
+          excludedDeals.set(product.index - 1, product.reason)
+        } else {
+          console.error('Invalid excluded product format:', product)
+        }
+      })
     } catch (error) {
-      console.error('Error parsing batch results:', error)
-      return []
+      console.error('Error parsing exclusion results:', error)
+      console.error('Raw content:', content)
+      console.error('Cleaned content:', cleanedContent)
     }
   } catch (error) {
-    console.error('Error matching deal batch:', error)
-    return []
+    console.error('Error checking exclusions:', error)
   }
+
+  return excludedDeals
+}
+
+async function findMatches(
+  deals: Deal[],
+  inclusions: string[]
+): Promise<Map<number, { confidence: number; reason: string }>> {
+  const matches = new Map<number, { confidence: number; reason: string }>()
+
+  const prompt = `You are finding food products that match specific dietary preferences.
+
+Products to evaluate:
+${deals.map((deal, i) => `${i + 1}. ${deal.product_name}${deal.product_description ? ` - ${deal.product_description}` : ''}`).join('\n')}
+
+Preferences to match (product must match AT LEAST ONE):
+${inclusions.map(inc => `- ${inc}`).join('\n')}
+
+Instructions:
+- Find products that CLEARLY match at least one preference
+- Require clear evidence from product name, description, or category
+- Provide confidence score (0-100) for how well it matches
+- Only include matches with 70%+ confidence
+- Explain exactly why each product matches
+- Return valid JSON only - no explanatory text or markdown
+
+Return Format:
+{
+  "matches": [
+    {
+      "index": product_number,
+      "confidence": confidence_score,
+      "reason": "Clear explanation of how this product matches a preference"
+    }
+  ]
+}
+
+Return ONLY the JSON object. No other text, no markdown formatting.`
+
+  try {
+    const response = await anthropic.messages.create({
+      model: 'claude-3-haiku-20240307',
+      max_tokens: 1000,
+      temperature: 0,
+      messages: [{ role: 'user', content: prompt }],
+    })
+
+    const content = response.content[0].type === 'text' ? response.content[0].text : ''
+    let cleanedContent = ''
+    
+    try {
+      // Clean the JSON string more aggressively
+      cleanedContent = content
+        .trim()
+        // Remove any markdown code block syntax
+        .replace(/^```json\s*/, '')
+        .replace(/\s*```$/, '')
+        // Remove any trailing commas before closing brackets
+        .replace(/,(\s*[}\]])/g, '$1')
+        // Remove any non-JSON text before or after the object
+        .replace(/^[^{]*({[\s\S]*})[^}]*$/, '$1')
+
+      const result = JSON.parse(cleanedContent)
+      
+      if (!result.matches || !Array.isArray(result.matches)) {
+        console.error('Invalid matches result format:', result)
+        return matches
+      }
+
+      result.matches.forEach((match: { index: number, confidence: number, reason: string }) => {
+        if (typeof match.index === 'number' && 
+            match.index > 0 && 
+            match.index <= deals.length &&
+            typeof match.confidence === 'number' &&
+            match.confidence >= 70 &&
+            typeof match.reason === 'string') {
+          matches.set(match.index - 1, {
+            confidence: match.confidence,
+            reason: match.reason
+          })
+        } else {
+          console.error('Invalid match format:', match)
+        }
+      })
+    } catch (error) {
+      console.error('Error parsing match results:', error)
+      console.error('Raw content:', content)
+      console.error('Cleaned content:', cleanedContent)
+    }
+  } catch (error) {
+    console.error('Error finding matches:', error)
+  }
+
+  return matches
 }
 
 export async function findMatchingDeals(
   deals: Deal[],
-  preferences: string[]
+  preferenceTexts: string[]
 ): Promise<Array<Deal & { confidence_score: number; matching_explanation: string }>> {
-  const matchingDeals: Array<Deal & { confidence_score: number; matching_explanation: string }> = []
-  const dealBatches: Deal[][] = []
+  // Split preferences
+  const exclusions = preferenceTexts
+    .filter(p => p.toLowerCase().startsWith('no '))
+    .map(p => p.slice(3))
+  const inclusions = preferenceTexts
+    .filter(p => !p.toLowerCase().startsWith('no '))
 
-  // Split deals into batches
+  const matchedDeals: Array<Deal & { confidence_score: number; matching_explanation: string }> = []
+
+  // Process in batches
   for (let i = 0; i < deals.length; i += BATCH_SIZE) {
-    dealBatches.push(deals.slice(i, i + BATCH_SIZE))
-  }
-
-  // Process batches with limited concurrency
-  const batchResults: BatchMatchResult[] = []
-  for (let i = 0; i < dealBatches.length; i += MAX_CONCURRENT_CALLS) {
-    const currentBatches = dealBatches.slice(i, i + MAX_CONCURRENT_CALLS)
-    const batchPromises = currentBatches.map((batch, batchIndex) => 
-      matchDealBatch(
-        batch, 
-        preferences,
-        (i + batchIndex) * BATCH_SIZE
-      )
-    )
+    const batch = deals.slice(i, Math.min(i + BATCH_SIZE, deals.length))
     
-    const results = await Promise.all(batchPromises)
-    results.forEach((result, batchIndex) => {
-      const batchOffset = (i + batchIndex) * BATCH_SIZE
-      result.forEach(match => {
-        const globalDealIndex = batchOffset + match.dealIndex
-        const deal = deals[globalDealIndex]
-        
-        // Final validation before adding to results
-        if (deal && match.explanation.toLowerCase().startsWith(deal.product_name.toLowerCase())) {
-          batchResults.push({
-            ...match,
-            dealIndex: globalDealIndex
+    // 1. Check exclusions first
+    const excludedIndices = await checkExclusions(batch, exclusions)
+    console.log(`Batch ${i / BATCH_SIZE + 1}: Found ${excludedIndices.size} excluded items`)
+    
+    // 2. Find matches among non-excluded items
+    const remainingDeals = batch.filter((_, index) => !excludedIndices.has(index))
+    if (remainingDeals.length > 0) {
+      const matches = await findMatches(remainingDeals, inclusions)
+      console.log(`Batch ${i / BATCH_SIZE + 1}: Found ${matches.size} matching items`)
+
+      // Add matches to final results
+      remainingDeals.forEach((deal, index) => {
+        const match = matches.get(index)
+        if (match) {
+          matchedDeals.push({
+            ...deal,
+            confidence_score: match.confidence,
+            matching_explanation: match.reason
           })
         }
       })
-    })
+    }
   }
 
-  // Process batch results to find best matches
-  const dealMatches = new Map<number, { confidence: number; explanation: string }>()
-  
-  batchResults.forEach(result => {
-    const currentBest = dealMatches.get(result.dealIndex)
-    if (!currentBest || result.confidence > currentBest.confidence) {
-      dealMatches.set(result.dealIndex, {
-        confidence: result.confidence,
-        explanation: result.explanation
-      })
-    }
-  })
-
-  // Create final matched deals array
-  dealMatches.forEach((match, dealIndex) => {
-    const deal = deals[dealIndex]
-    if (deal) {
-      matchingDeals.push({
-        ...deal,
-        confidence_score: match.confidence,
-        matching_explanation: match.explanation
-      })
-    }
-  })
-
-  return matchingDeals
+  return matchedDeals
 } 

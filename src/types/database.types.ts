@@ -6,6 +6,8 @@ export type Json =
   | { [key: string]: Json | undefined }
   | Json[]
 
+export type PreferenceType = 'include' | 'exclude'
+
 export interface Database {
   public: {
     Tables: {
@@ -14,6 +16,7 @@ export interface Database {
           id: string
           user_id: string
           preference_text: string
+          preference_type: PreferenceType
           created_at: string
           updated_at: string
         }
@@ -21,6 +24,7 @@ export interface Database {
           id?: string
           user_id: string
           preference_text: string
+          preference_type?: PreferenceType
           created_at?: string
           updated_at?: string
         }
@@ -28,6 +32,7 @@ export interface Database {
           id?: string
           user_id?: string
           preference_text?: string
+          preference_type?: PreferenceType
           created_at?: string
           updated_at?: string
         }
