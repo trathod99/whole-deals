@@ -173,13 +173,12 @@ export default function PreferencesForm({
         </div>
 
         {/* Main heading */}
-        <div className="mb-16 text-center space-y-6">
-          <h1 className="text-[2.75rem] font-bold tracking-tight leading-tight">
-            What are your food preferences?
+        <div className="mb-16 text-center space-y-4">
+          <h1 className="mt-16 text-[2.75rem] font-bold tracking-tight leading-tight">
+            What's for dinner?
           </h1>
           <p className="text-zinc-500 text-xl leading-relaxed max-w-xl mx-auto">
-            Your preferences help us customize your weekly deals. You can always
-            change these later.
+            Get the Whole Foods deals that matter to you, <br></br>straight to your inbox.
           </p>
         </div>
 
@@ -240,7 +239,7 @@ export default function PreferencesForm({
 
             {error && <p className="text-sm text-red-600">{error}</p>}
 
-            <div className="grid gap-4">
+            <div className="grid gap-4 mt-3">
               <Label className="text-lg font-medium">Your preferences</Label>
               <div className="grid gap-3">
                 {preferences.length === 0 ? (
@@ -286,7 +285,7 @@ export default function PreferencesForm({
             disabled={isSubmitting}
             className="h-14 px-12 text-lg font-medium rounded-full border-zinc-200 hover:bg-zinc-50"
           >
-            {isSubmitting ? 'Testing...' : 'Test Scrape'}
+            {isSubmitting ? 'Finding Deals...' : 'See Matching Deals'}
           </Button>
           <Button
             onClick={handleSave}
