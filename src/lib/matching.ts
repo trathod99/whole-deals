@@ -1,5 +1,6 @@
 import { Anthropic } from '@anthropic-ai/sdk'
 import { Database } from '@/types/database.types'
+import PreferencesForm from './PreferencesForm'
 
 type Deal = Omit<
   Database['public']['Tables']['matched_deals']['Insert'],

@@ -16,8 +16,8 @@ export default function LoginButton() {
         options: {
           queryParams: {
             access_type: 'offline',
-            prompt: 'consent',
           },
+          redirectTo: `${window.location.origin}/auth/callback`
         },
       })
 

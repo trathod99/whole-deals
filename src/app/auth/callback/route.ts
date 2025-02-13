@@ -12,13 +12,19 @@ export async function GET(request: Request) {
   if (code) {
     const supabase = createRouteHandlerClient({ cookies })
     try {
-      await supabase.auth.exchangeCodeForSession(code)
+      const { error } = await supabase.auth.exchangeCodeForSession(code)
+      if (error) {
+        console.error('Session exchange error:', error)
+        return NextResponse.redirect(new URL('/auth/error', requestUrl.origin))
+      }
     } catch (error) {
       console.error('Error exchanging code for session:', error)
       return NextResponse.redirect(new URL('/auth/error', requestUrl.origin))
     }
   }
 
-  // URL to redirect to after sign in process completes
-  return NextResponse.redirect(new URL('/', requestUrl.origin))
+  // Add cache-control header to prevent caching
+  const response = NextResponse.redirect(new URL('/', requestUrl.origin))
+  response.headers.set('Cache-Control', 'no-store, max-age=0')
+  return response
 } 

@@ -1,41 +1,81 @@
 'use client'
 
-import { useState } from 'react'
+import React, { useState, useCallback } from 'react'
 import { createClientComponentClient } from '@supabase/auth-helpers-nextjs'
-import { Database, PreferenceType } from '@/types/database.types'
 import { useRouter } from 'next/navigation'
+import { Database, PreferenceType } from '@/types/database.types'
+import { Plus, X, ChevronDown } from 'lucide-react'
 
-type Preference = Database['public']['Tables']['user_preferences']['Row']
+import { Button } from '@/components/ui/button'
+import { Input } from '@/components/ui/input'
+import { Label } from '@/components/ui/label'
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from '@/components/ui/dropdown-menu'
+
+// The Database row for a user preference
+type PreferenceRow = Database['public']['Tables']['user_preferences']['Row']
+
+// Convert Supabase row -> local state
+function toLocalPreference(pref: PreferenceRow) {
+  return {
+    id: pref.id,
+    text: pref.preference_text,
+    type: pref.preference_type as 'include' | 'exclude',
+  }
+}
+
+// Convert local state -> insert object
+function toInsertObject(
+  userId: string,
+  text: string,
+  type: 'include' | 'exclude'
+) {
+  return {
+    user_id: userId,
+    preference_text: text,
+    preference_type: type,
+  }
+}
 
 interface PreferencesFormProps {
   userId: string
-  initialPreferences: Preference[]
+  initialPreferences: PreferenceRow[]
 }
 
-export default function PreferencesForm({ userId, initialPreferences }: PreferencesFormProps) {
-  const [preferences, setPreferences] = useState<Preference[]>(initialPreferences)
+export default function PreferencesForm({
+  userId,
+  initialPreferences,
+}: PreferencesFormProps) {
+  // Transform the Supabase rows into our local shape
+  const [preferences, setPreferences] = useState<
+    { id: string; text: string; type: 'include' | 'exclude' }[]
+  >(() => initialPreferences.map(toLocalPreference))
+
   const [newPreference, setNewPreference] = useState('')
-  const [preferenceType, setPreferenceType] = useState<PreferenceType>('include')
-  const [isSubmitting, setIsSubmitting] = useState(false)
+  const [preferenceType, setPreferenceType] = useState<'include' | 'exclude'>(
+    'include'
+  )
   const [error, setError] = useState<string | null>(null)
+  const [isSubmitting, setIsSubmitting] = useState(false)
+
   const router = useRouter()
   const supabase = createClientComponentClient<Database>()
 
-  const handleAddPreference = async (e: React.FormEvent) => {
-    e.preventDefault()
-    if (!newPreference.trim()) return
+  // Supabase insert
+  const handleAddPreference = async () => {
+    const trimmed = newPreference.trim()
+    if (!trimmed) return
 
     setIsSubmitting(true)
     setError(null)
-
     try {
       const { data, error: insertError } = await supabase
         .from('user_preferences')
-        .insert({
-          user_id: userId,
-          preference_text: newPreference.trim(),
-          preference_type: preferenceType,
-        })
+        .insert(toInsertObject(userId, trimmed, preferenceType))
         .select('*')
         .single()
 
@@ -46,26 +86,27 @@ export default function PreferencesForm({ userId, initialPreferences }: Preferen
       }
 
       if (data) {
-        setPreferences((prev) => [...prev, data])
+        setPreferences((prev) => [...prev, toLocalPreference(data)])
         setNewPreference('')
-        setPreferenceType('include') // Reset to default
-        router.refresh()
       }
     } catch (error) {
       console.error('Error adding preference:', error)
       setError('Failed to add preference. Please try again.')
     } finally {
       setIsSubmitting(false)
+      // Refresh page or data
+      router.refresh()
     }
   }
 
-  const handleDeletePreference = async (preferenceId: string) => {
+  // Supabase delete
+  const handleRemovePreference = async (id: string) => {
     setError(null)
     try {
       const { error: deleteError } = await supabase
         .from('user_preferences')
         .delete()
-        .eq('id', preferenceId)
+        .eq('id', id)
 
       if (deleteError) {
         console.error('Error deleting preference:', deleteError)
@@ -73,76 +114,189 @@ export default function PreferencesForm({ userId, initialPreferences }: Preferen
         return
       }
 
-      setPreferences((prev) => prev.filter((p) => p.id !== preferenceId))
-      router.refresh()
+      setPreferences((prev) => prev.filter((pref) => pref.id !== id))
     } catch (error) {
       console.error('Error deleting preference:', error)
       setError('Failed to delete preference. Please try again.')
+    } finally {
+      router.refresh()
     }
   }
 
+  // Example "Save" button logic (optional - your old code saved as you went)
+  const handleSave = () => {
+    // You may not actually need this if insertion/deletion is enough
+    console.log('Preferences (already saved to DB):', preferences)
+  }
+
+  // Simplified test scrape handler without toast notifications
+  const handleTestScrape = useCallback(async () => {
+    setIsSubmitting(true)
+    setError(null)
+
+    try {
+      const response = await fetch('/api/test-scrape')  // Changed: GET request to /api/test-scrape
+      const data = await response.json()
+
+      if (!response.ok) {
+        throw new Error(data.error || 'Failed to scrape deals')
+      }
+
+      // Log the result like the original did
+      console.log('Test scrape results:', data)
+    } catch (error) {
+      console.error('Error testing scraper:', error)
+      setError(error instanceof Error ? error.message : 'An error occurred')
+    } finally {
+      setIsSubmitting(false)
+    }
+  }, [])  // No dependencies needed since we're not using userId anymore
+
+  // Add this handler
+  const handleSignOut = async () => {
+    await supabase.auth.signOut()
+    router.refresh()
+  }
+
   return (
-    <div className="space-y-6">
-      <form onSubmit={handleAddPreference} className="space-y-4">
-        <div className="flex gap-4">
-          <input
-            type="text"
-            value={newPreference}
-            onChange={(e) => setNewPreference(e.target.value)}
-            placeholder="Enter a food preference (e.g., 'high protein', 'seafood')"
-            className="flex-1 rounded-md border-0 py-1.5 text-gray-900 shadow-sm ring-1 ring-inset ring-gray-300 placeholder:text-gray-400 focus:ring-2 focus:ring-inset focus:ring-blue-600 sm:text-sm sm:leading-6"
-          />
-          <select
-            value={preferenceType}
-            onChange={(e) => setPreferenceType(e.target.value as PreferenceType)}
-            className="rounded-md border-0 py-1.5 text-gray-900 shadow-sm ring-1 ring-inset ring-gray-300 focus:ring-2 focus:ring-inset focus:ring-blue-600 sm:text-sm sm:leading-6"
+    <main className="min-h-screen bg-[#F8F7FA]">
+      <div className="mx-auto max-w-2xl px-6 py-8 md:px-8">
+        {/* Update the sign out button */}
+        <div className="mb-12 text-right">
+          <Button
+            variant="ghost"
+            onClick={handleSignOut}
+            className="text-zinc-400 text-lg hover:text-zinc-600 hover:bg-transparent"
           >
-            <option value="include">Include</option>
-            <option value="exclude">Exclude</option>
-          </select>
-          <button
-            type="submit"
-            disabled={isSubmitting || !newPreference.trim()}
-            className="rounded-md bg-blue-600 px-3 py-2 text-sm font-semibold text-white shadow-sm hover:bg-blue-500 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600 disabled:opacity-50 disabled:cursor-not-allowed"
-          >
-            {isSubmitting ? 'Adding...' : 'Add Preference'}
-          </button>
+            Sign Out
+          </Button>
         </div>
-      </form>
 
-      {error && (
-        <p className="text-sm text-red-600">{error}</p>
-      )}
+        {/* Main heading */}
+        <div className="mb-16 text-center space-y-6">
+          <h1 className="text-[2.75rem] font-bold tracking-tight leading-tight">
+            What are your food preferences?
+          </h1>
+          <p className="text-zinc-500 text-xl leading-relaxed max-w-xl mx-auto">
+            Your preferences help us customize your weekly deals. You can always
+            change these later.
+          </p>
+        </div>
 
-      <div className="space-y-2">
-        {preferences.length === 0 ? (
-          <p className="text-sm text-gray-500">No preferences added yet.</p>
-        ) : (
-          preferences.map((preference) => (
-            <div
-              key={preference.id}
-              className="flex items-center justify-between rounded-md border border-gray-200 px-4 py-2"
-            >
-              <div className="flex items-center gap-2">
-                <span className={`inline-flex items-center rounded-full px-2 py-1 text-xs font-medium ${
-                  preference.preference_type === 'include' 
-                    ? 'bg-green-100 text-green-700' 
-                    : 'bg-red-100 text-red-700'
-                }`}>
-                  {preference.preference_type === 'include' ? 'Include' : 'Exclude'}
-                </span>
-                <span className="text-sm text-gray-700">{preference.preference_text}</span>
+        {/* Preferences controls */}
+        <div className="space-y-8 mb-16">
+          <div className="grid gap-6">
+            <div className="grid gap-4">
+              <Label htmlFor="preference" className="text-lg font-medium">
+                Add a preference
+              </Label>
+              <div className="flex gap-3 items-center">
+                <div className="relative flex-grow">
+                  <Input
+                    id="preference"
+                    placeholder="e.g., high protein, no seafood"
+                    value={newPreference}
+                    disabled={isSubmitting}
+                    onChange={(e) => setNewPreference(e.target.value)}
+                    onKeyDown={(e) => e.key === 'Enter' && handleAddPreference()}
+                    className="h-14 text-lg rounded-full border-zinc-200 bg-white shadow-sm pl-6 pr-32"
+                  />
+                  <div className="absolute right-3 top-1/2 -translate-y-1/2">
+                    <DropdownMenu>
+                      <DropdownMenuTrigger
+                        className="flex items-center gap-1 text-base font-normal focus:outline-none"
+                        disabled={isSubmitting}
+                      >
+                        {preferenceType === 'include' ? 'Include' : 'Exclude'}
+                        <ChevronDown className="h-4 w-4 text-zinc-400" />
+                      </DropdownMenuTrigger>
+                      <DropdownMenuContent align="end">
+                        <DropdownMenuItem
+                          className="text-base"
+                          onClick={() => setPreferenceType('include')}
+                        >
+                          Include
+                        </DropdownMenuItem>
+                        <DropdownMenuItem
+                          className="text-base"
+                          onClick={() => setPreferenceType('exclude')}
+                        >
+                          Exclude
+                        </DropdownMenuItem>
+                      </DropdownMenuContent>
+                    </DropdownMenu>
+                  </div>
+                </div>
+                <Button
+                  onClick={handleAddPreference}
+                  size="icon"
+                  disabled={isSubmitting || !newPreference.trim()}
+                  className="h-14 w-14 rounded-full bg-zinc-900 text-white hover:bg-zinc-800 flex items-center justify-center"
+                >
+                  <Plus className="h-6 w-6" />
+                </Button>
               </div>
-              <button
-                onClick={() => handleDeletePreference(preference.id)}
-                className="ml-2 text-sm font-medium text-red-600 hover:text-red-500"
-              >
-                Remove
-              </button>
             </div>
-          ))
-        )}
+
+            {error && <p className="text-sm text-red-600">{error}</p>}
+
+            <div className="grid gap-4">
+              <Label className="text-lg font-medium">Your preferences</Label>
+              <div className="grid gap-3">
+                {preferences.length === 0 ? (
+                  <p className="text-lg text-zinc-500">
+                    No preferences added yet
+                  </p>
+                ) : (
+                  preferences.map((pref) => (
+                    <div
+                      key={pref.id}
+                      className="flex items-center justify-between rounded-full border border-zinc-200 bg-white py-3 px-6 shadow-sm"
+                    >
+                      <div className="flex items-center gap-3 flex-grow">
+                        <span className="text-lg">{pref.text}</span>
+                        <span
+                          className="rounded-full bg-zinc-100 px-4 py-1 text-sm text-zinc-600"
+                        >
+                          {pref.type}
+                        </span>
+                      </div>
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        disabled={isSubmitting}
+                        onClick={() => handleRemovePreference(pref.id)}
+                        className="hover:bg-zinc-100 transition-colors ml-2 rounded-full"
+                      >
+                        <X className="h-5 w-5 text-zinc-400" />
+                      </Button>
+                    </div>
+                  ))
+                )}
+              </div>
+            </div>
+          </div>
+        </div>
+
+        {/* Example bottom buttons */}
+        <div className="flex justify-center gap-3">
+          <Button
+            variant="outline"
+            onClick={handleTestScrape}
+            disabled={isSubmitting}
+            className="h-14 px-12 text-lg font-medium rounded-full border-zinc-200 hover:bg-zinc-50"
+          >
+            {isSubmitting ? 'Testing...' : 'Test Scrape'}
+          </Button>
+          <Button
+            onClick={handleSave}
+            className="h-14 px-12 text-lg font-medium rounded-full bg-zinc-900 text-white hover:bg-zinc-800"
+            disabled={isSubmitting}
+          >
+            Save
+          </Button>
+        </div>
       </div>
-    </div>
+    </main>
   )
 } 
